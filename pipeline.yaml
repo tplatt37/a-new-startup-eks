@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: A-New-Startup - EKS - Sets up the CI/CD Pipeline for creating Container Image
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: a-new-startup-eks
+    Description: "A Prefix to use on the resource names."
+  
+Resources:
+  
+#  ___  __  ____  ____  ____  __  ____  ____  __    __  __ _  ____ 
+# / __)/  \(    \(  __)(  _ \(  )(  _ \(  __)(  )  (  )(  ( \(  __)
+#( (__(  O )) D ( ) _)  ) __/ )(  ) __/ ) _) / (_/\ )( /    / ) _) 
+# \___)\__/(____/(____)(__)  (__)(__)  (____)\____/(__)\_)__)(____) 
+# 
+#
+
+  # This simple pipeline Builds a Container Image for A-New-Startup, and pushes it to ECR.
+  AppPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Join [ '-', [!Ref Prefix, "containerized"]]
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue
+          Fn::Join: [ '-', [!Ref Prefix, "ArtifactStoreBucket"]]
+      RoleArn: !ImportValue
+        Fn::Join: [ '-', [!Ref Prefix, "CodePipelineServiceRole"]]
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Application-Code
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: "main"
+                RepositoryName: 
+                  Fn::ImportValue:
+                    !Join ["-", [ !Ref Prefix, "AppSourceRepo"]]
+
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build-App-Container-Image
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !ImportValue 
+                  Fn::Join: [ '-', [!Ref Prefix, "BuildProject"]]
+              RunOrder: 1
+
+  # This simple pipeline builds (lint/package) the Helm Chart then pushes it to a Helm Chart Repo
+  ChartPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Join [ '-', [!Ref Prefix, "chart"]]
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue
+          Fn::Join: [ '-', [!Ref Prefix, "ArtifactStoreBucket"]]
+      RoleArn: !ImportValue
+        Fn::Join: [ '-', [!Ref Prefix, "CodePipelineServiceRole"]]
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Chart
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: "main"
+                RepositoryName: 
+                  Fn::ImportValue:
+                    !Join ["-", [ !Ref Prefix, "ChartSourceRepo"]]
+
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build-Push-Chart
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !ImportValue 
+                  Fn::Join: [ '-', [!Ref Prefix, "ChartBuildProject"]]
+              RunOrder: 1
+
+  # This pipeline deploys to the EKS cluster using Helm (and the chart created by the other pipeline)
+  # It also ensures the Backend resources (DDB/SNS/SQS) are created and up to date.
+  DeployPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Join [ '-', [!Ref Prefix, "deploy"]]
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue
+          Fn::Join: [ '-', [!Ref Prefix, "ArtifactStoreBucket"]]
+      RoleArn: !ImportValue
+        Fn::Join: [ '-', [!Ref Prefix, "CodePipelineServiceRole"]]
+      Stages:
+        # We need this to get the buildspec used by CodeBuild
+        - Name: SourceCode
+          Actions:
+            # Need the buildspec for the deploy codebuild
+            - Name: Chart-Source-For-Buildspec
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: BuildspecOutput
+              Configuration:
+                BranchName: "main"
+                RepositoryName: 
+                  Fn::ImportValue:
+                    !Join ["-", [ !Ref Prefix, "ChartSourceRepo"]]
+                PollForSourceChanges: false
+              RunOrder: 1
+
+            # We need the template.yaml file from the app source code to create the backend resources (DDB table, etc.)
+            - Name: App-Source-For-IaC-Template
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceAppOutput
+              Configuration:
+                BranchName: "main"
+                RepositoryName: 
+                  Fn::ImportValue:
+                    !Join ["-", [ !Ref Prefix, "AppSourceRepo"]]
+
+                PollForSourceChanges: false
+              RunOrder: 1
+
+        - Name: Deploy-Backend-IaC
+          Actions:
+            - Name: Deploy-Backend-Cfn
+              InputArtifacts:
+                # need to pass backend.yaml through from the source to the deploy stage.
+                - Name: SourceAppOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn: !ImportValue 
+                  Fn::Join: [ '-', [!Ref Prefix, "CFNDeployRole"]]
+                # We're updating an existing stack.
+                StackName: !Join [ "-", [ !Ref Prefix, "backend"]]
+                # THIS IS COMING FROM THE APP SOURCE CODE
+                # This is the template that creates the dynamically named DDB table, SNS Topic, and SQS queue.
+                TemplatePath: "SourceAppOutput::template.yaml"
+                # We're changing a parameter of the template - to ensure unique resource names.
+                # See here: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-action-reference.html
+                ParameterOverrides: '{"Prefix":"a-new-startup-eks","Environment":"dev"}'
+
+        - Name: Deploy-k8s-via-Chart
+          Actions:
+            - Name: Deploy-Chart
+              InputArtifacts:
+                # We need the Chart Source solely to get the BUILDSPEC file for this project.
+                # Otherwise...
+                # We don't really need this (the chart pushed to S3 and env vars are the only thing
+                # we actually need)
+                - Name: BuildspecOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !ImportValue 
+                  Fn::Join: [ '-', [!Ref Prefix, "DeployBuildProject"]]
+              RunOrder: 1
+           
