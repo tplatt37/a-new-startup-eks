@@ -14,7 +14,11 @@ if [ -z $2 ]; then
 fi
 CLUSTER_NAME=$2
 
-# Optional 3rd parameter is a comma delimited list of CIDR IPs
+# REQUIRED 3rd parameter is a comma delimited list of CIDR IPs
+if [ -z $3 ]; then
+        echo "Need a comma delimited list of CIDR IP ranges for protecting the ELBs.. Exiting..."
+        exit 0
+fi
 CIDRIPS=$3
 
 REGION=${AWS_DEFAULT_REGION:-$(aws configure get default.region)}
