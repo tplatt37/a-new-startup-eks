@@ -22,6 +22,7 @@ kubectl create ns $NAMESPACE
 
 # Helm uses Secrets to store config information.  The subject we use will need this cluster role.
 kubectl apply -f cluster-role-secret-reader.yaml 
+kubectl apply -f ingressclasses-update.yaml
 
 # Setting a RoleBinding in multiple namespaces.
 kubectl create rolebinding codebuild-deploy-admin --clusterrole=admin --user=codebuild-deploy -n $NAMESPACE
@@ -29,6 +30,7 @@ kubectl create rolebinding codebuild-deploy-admin-default --clusterrole=admin --
 
 # Giving ability to read secrets cluster wide, also needed by Helm.
 kubectl create clusterrolebinding codebuild-secret-reader --clusterrole=secret-reader --user=codebuild-deploy
+kubectl create clusterrolebinding codebuild-ingressclasses-update --clusterrole=ingressclasses-update --user=codebuild-deploy
 
 # Need to get the Arn of the Role that the Build Project uses in CodeBuild. It's an Export in one of the stacks.
 EXPORT_NAME=$PREFIX-BuildRole
